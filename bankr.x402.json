@@ -1,0 +1,137 @@
+{
+  "network": "base",
+  "currency": "USDC",
+  "services": {
+    "precheck": {
+      "description": "Pre-pay risk & policy precheck for x402 agent payments. Send a 402 challenge (or payTo + amount) and get an allow/warn/block verdict with a risk score before you spend. Screens payee against denylist/flagged lists, flags price gouging vs. category bands, validates the asset/network/facilitator, and enforces your own spend policy.",
+      "price": "0.001",
+      "methods": ["GET", "POST"],
+      "schema": {
+        "input": {
+          "type": "object",
+          "properties": {
+            "challenge": {
+              "type": "object",
+              "description": "The raw JSON body of the HTTP 402 response you received (with an `accepts` array), or a single PaymentRequirements object. If provided, payTo/amount/asset/network are parsed from it."
+            },
+            "payTo": {
+              "type": "string",
+              "description": "Destination address from the 402 envelope (e.g. 0x...). Required if `challenge` is not given."
+            },
+            "amount": {
+              "type": "number",
+              "description": "Price in USD the endpoint is asking for (e.g. 0.01). Use this OR maxAmountRequired."
+            },
+            "maxAmountRequired": {
+              "type": "string",
+              "description": "Price in atomic token units (alternative to `amount`); converted using the asset's decimals."
+            },
+            "asset": {
+              "type": "string",
+              "description": "Settlement asset symbol (e.g. 'USDC') or token contract address."
+            },
+            "network": {
+              "type": "string",
+              "description": "Settlement network (e.g. 'base', 'solana'). Required if `challenge` is not given."
+            },
+            "resource": {
+              "type": "string",
+              "description": "The endpoint URL being paid for (used for context and reputation)."
+            },
+            "facilitator": {
+              "type": "string",
+              "description": "Facilitator URL or host from the 402 envelope."
+            },
+            "category": {
+              "type": "string",
+              "description": "Service category hint for price-band comparison.",
+              "enum": [
+                "llm-compact",
+                "llm",
+                "market-data",
+                "crypto-data",
+                "rpc",
+                "scrape",
+                "web-search",
+                "social-data",
+                "data-enrichment",
+                "image-gen",
+                "video-gen",
+                "prediction",
+                "identity",
+                "generic"
+              ]
+            },
+            "policy": {
+              "type": "object",
+              "description": "Optional caller spend policy enforced against this payment.",
+              "properties": {
+                "maxPerCallUsd": { "type": "number", "description": "Hard per-call USD limit." },
+                "allowlist": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "If set, payTo must be one of these addresses."
+                },
+                "blocklist": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "payTo must not be one of these addresses."
+                },
+                "allowedNetworks": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Permitted settlement networks."
+                },
+                "allowedAssets": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Permitted settlement assets (symbols or contracts)."
+                },
+                "maxRiskScore": {
+                  "type": "number",
+                  "description": "Block if the computed risk score (0-100) exceeds this."
+                }
+              }
+            }
+          }
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "description": "allow | warn | block",
+              "enum": ["allow", "warn", "block"]
+            },
+            "recommendation": {
+              "type": "string",
+              "description": "proceed | proceed_with_caution | do_not_pay"
+            },
+            "riskScore": {
+              "type": "number",
+              "description": "0-100, higher is riskier."
+            },
+            "summary": { "type": "string", "description": "Human-readable verdict summary." },
+            "payTo": { "type": "string", "description": "Normalized payee address." },
+            "amountUsd": { "type": "number", "description": "Resolved price in USD." },
+            "category": { "type": "string", "description": "Category used for banding." },
+            "priceBand": {
+              "type": "object",
+              "description": "p50 / p90 / max USD band for the category."
+            },
+            "checks": {
+              "type": "array",
+              "description": "Itemized check results (id, label, status, detail).",
+              "items": { "type": "object" }
+            },
+            "flags": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "IDs of checks that warned or failed."
+            }
+          }
+        }
+      }
+    }
+  }
+}

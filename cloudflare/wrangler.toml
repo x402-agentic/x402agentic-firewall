@@ -1,0 +1,22 @@
+name = "x402agentic-firewall"
+main = "src/worker.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat", "nodejs_compat_populate_process_env"]
+
+# Your receiving wallet and pricing. Set secrets/vars before deploy:
+#   wrangler deploy
+#   wrangler secret put PAY_TO          (or set as [vars] below if non-sensitive)
+[vars]
+PRICE_USDC = "0.001"
+NETWORK = "base"
+ASSET = "0x833589fcD6eDb6E08f4c7C32D4f71b54bdA02913"  # USDC on Base
+ASSET_NAME = "USDC"
+ASSET_VERSION = "2"
+FACILITATOR_URL = "https://x402.org/facilitator"
+
+# Optional KV namespace for operator blocklists / price overrides.
+# Create it:  wrangler kv namespace create FIREWALL_KV
+# then paste the returned id below and uncomment.
+# [[kv_namespaces]]
+# binding = "FIREWALL_KV"
+# id = "REPLACE_WITH_KV_ID"
