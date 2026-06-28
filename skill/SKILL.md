@@ -1,6 +1,6 @@
 ---
-name: x402-prepay-check
-description: Before paying ANY x402 endpoint, call the x402Agentic Payment Pre-Flight Check to get an allow/warn/block verdict. Use this whenever an agent is about to settle an x402 / HTTP 402 payment — it screens the payee against denylist and flagged lists, flags price gouging, validates the asset/network/facilitator, and enforces the user's spend policy. Stops bad payments before money leaves the wallet.
+name: x402-precheck
+description: Before paying ANY x402 endpoint, call the x402Agentic Payment Pre-Flight Check to get an allow/warn/block verdict. Use this whenever an agent is about to settle an x402 / HTTP 402 payment — it validates the payee address, screens it against denylist and community-flagged lists, flags price gouging vs. category norms, checks the asset/network, and enforces the user's spend policy. Stops bad payments before money leaves the wallet.
 tags: [x402, payments, security, agents, risk, precheck, safety]
 version: 1
 visibility: public
@@ -16,11 +16,13 @@ metadata:
 
 A pre-pay risk gate for autonomous agents. **Call it right before you pay any
 x402 endpoint.** It returns a verdict — `allow`, `warn`, or `block` — plus a
-0–100 risk score and itemized reasons, so you never settle a payment to a
-denied/flagged payee, overpay a gouging endpoint, or pay in the wrong asset.
+0–100 risk score and itemized reasons, so you never settle a payment to an
+invalid/denied/flagged payee, overpay a gouging endpoint, or pay in the wrong
+asset.
 
-Endpoint: `https://x402.bankr.bot/<provider-wallet>/precheck`
-Price: ~$0.001 USDC/call (cheap on purpose — call it on every payment).
+Endpoint: `https://api.x402agentic.ai/precheck`
+Price: ~$0.001 USDC/call on Base (cheap on purpose — call it on every payment).
+Discovery route (free): `https://api.x402agentic.ai/`
 
 ## When to use
 
@@ -38,22 +40,23 @@ If `allow`, proceed with the payment.
 
 ## How to call
 
-You can forward the entire 402 response body as `challenge`, or pass fields
-directly. POST is preferred.
+Forward the entire 402 response body as `challenge`, or pass fields directly.
+POST is preferred. The endpoint is itself x402-paid: your agent wallet pays the
+~$0.001 fee automatically through the normal 402 flow (e.g. via `x402-fetch`).
 
 ```bash
 # Forward the raw 402 challenge you just received
-curl -X POST "https://x402.bankr.bot/<provider-wallet>/precheck" \
+curl -X POST "https://api.x402agentic.ai/precheck" \
   -H "Content-Type: application/json" \
   -d '{ "challenge": <the JSON body of the 402 response>, "category": "llm" }'
 ```
 
 ```bash
-# Or pass fields explicitly
-curl -X POST "https://x402.bankr.bot/<provider-wallet>/precheck" \
+# Or pass fields explicitly, with an optional spend policy
+curl -X POST "https://api.x402agentic.ai/precheck" \
   -H "Content-Type: application/json" \
   -d '{
-        "payTo": "0xabc...",
+        "payTo": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         "amount": 0.01,
         "asset": "USDC",
         "network": "base",
@@ -65,11 +68,8 @@ curl -X POST "https://x402.bankr.bot/<provider-wallet>/precheck" \
 
 ```bash
 # GET also works for quick checks
-curl "https://x402.bankr.bot/<provider-wallet>/precheck?payTo=0xabc...&amount=0.01&network=base&category=llm"
+curl "https://api.x402agentic.ai/precheck?payTo=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913&amount=0.01&network=base&category=llm"
 ```
-
-This endpoint is itself x402-paid: your agent's wallet pays the ~$0.001 fee
-automatically through the normal 402 flow (Bankr / x402-fetch handle signing).
 
 ## Inputs
 
@@ -93,7 +93,7 @@ automatically through the normal 402 flow (Bankr / x402-fetch handle signing).
   "verdict": "allow | warn | block",
   "recommendation": "proceed | proceed_with_caution | do_not_pay",
   "riskScore": 0,
-  "summary": "Safe to pay. All precheck checks passed.",
+  "summary": "Safe to pay. All checks passed.",
   "payTo": "0x...",
   "amountUsd": 0.01,
   "category": "market-data",
@@ -109,4 +109,12 @@ automatically through the normal 402 flow (Bankr / x402-fetch handle signing).
 2. `warn` → only pay if within the user's risk tolerance / policy.
 3. `allow` → pay.
 
-See `references/checks.md` for the full list of checks and scoring.
+## Checks performed
+
+envelope integrity · payee address validity · denylist screen · community-flagged
+reports · price vs. category band (gouging) · absolute per-call ceiling · asset
+sanity · network sanity · facilitator reputation · caller spend policy
+(allowlist / blocklist / max-per-call / allowed networks / allowed assets /
+max risk score).
+
+See `references/checks.md` for the full scoring table.
