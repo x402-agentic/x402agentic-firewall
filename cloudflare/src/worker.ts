@@ -16,6 +16,7 @@ import { Hono } from "hono";
 import { paymentMiddleware } from "@x402/hono";
 import { x402ResourceServer, HTTPFacilitatorClient } from "@x402/core/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
+import { bazaarResourceServerExtension, declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { createFacilitatorConfig } from "@coinbase/x402";
 import { evaluate, type PrecheckInput } from "../../engine/core";
 
@@ -29,6 +30,58 @@ type Bindings = {
 
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const DESC = "x402Agentic pre-pay precheck — allow/warn/block risk verdict before paying any x402 endpoint";
+
+// Bazaar discovery extension: example input + output + schema for nicer listings.
+const CATEGORY_ENUM = [
+  "llm-compact", "llm", "market-data", "crypto-data", "rpc", "scrape",
+  "web-search", "social-data", "data-enrichment", "image-gen", "video-gen",
+  "prediction", "identity", "generic",
+];
+const DISCOVERY = declareDiscoveryExtension({
+  input: {
+    payTo: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    amount: 0.01,
+    network: "base",
+    category: "llm",
+  },
+  inputSchema: {
+    type: "object",
+    properties: {
+      payTo: { type: "string", description: "Destination address from the 402 envelope" },
+      amount: { type: "number", description: "Price in USD the endpoint is asking for" },
+      network: { type: "string", description: "Settlement network" },
+      category: { type: "string", enum: CATEGORY_ENUM, description: "Service category for price-band comparison" },
+    },
+    required: ["payTo", "amount", "network"],
+  },
+  output: {
+    example: {
+      verdict: "allow",
+      recommendation: "proceed",
+      riskScore: 0,
+      payTo: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      amountUsd: 0.01,
+      category: "llm",
+      priceBand: { p50: 0.002, p90: 0.05, max: 0.2 },
+      flags: [],
+    },
+    schema: {
+      type: "object",
+      properties: {
+        verdict: { type: "string", enum: ["allow", "warn", "block"] },
+        recommendation: { type: "string", enum: ["proceed", "proceed_with_caution", "do_not_pay"] },
+        riskScore: { type: "number" },
+        payTo: { type: "string" },
+        amountUsd: { type: "number" },
+        category: { type: "string" },
+        priceBand: { type: "object" },
+        checks: { type: "array", items: { type: "object" } },
+        flags: { type: "array", items: { type: "string" } },
+      },
+      required: ["verdict", "recommendation", "riskScore"],
+    },
+  },
+});
 
 // ---- Brand / provider metadata (edit here to update everywhere) ------------
 const PROVIDER = {
@@ -242,10 +295,11 @@ app.use("/precheck", async (c, next) => {
     );
     const server = new x402ResourceServer(facilitatorClient);
     server.register("eip155:*", new ExactEvmScheme());
+    server.registerExtension(bazaarResourceServerExtension);
     const accepts = [{ scheme: "exact", price: `$${priceUsd(c)}`, network: net(c), payTo: c.env.PAY_TO as `0x${string}` }];
     const routes = {
-      "GET /precheck": { accepts, description: DESC, mimeType: "application/json" },
-      "POST /precheck": { accepts, description: DESC, mimeType: "application/json" },
+      "GET /precheck": { accepts, description: DESC, mimeType: "application/json", extensions: { ...DISCOVERY } },
+      "POST /precheck": { accepts, description: DESC, mimeType: "application/json", extensions: { ...DISCOVERY } },
     };
     cachedMw = paymentMiddleware(routes as any, server as any);
   }
