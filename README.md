@@ -106,7 +106,7 @@ npm install
 npx wrangler deploy
 ```
 
-Endpoint: `https://x402agentic-precheck.<your-subdomain>.workers.dev/precheck`
+Endpoint: `https://api.x402agentic.ai/precheck`
 (`/health` is a free discovery route.)
 
 > **Facilitator note:** the `/verify` and `/settle` calls follow the x402

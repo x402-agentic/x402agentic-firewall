@@ -3,18 +3,17 @@ main = "src/worker.ts"
 compatibility_date = "2025-09-01"   # >= 2025-09 exposes Buffer global (needed by @coinbase/x402)
 compatibility_flags = ["nodejs_compat"]
 
-# Serve the Worker on your own domain. Requires x402agentic.ai to be a zone
-# in this same Cloudflare account. `custom_domain = true` makes Cloudflare
-# create the DNS record + TLS cert automatically on `wrangler deploy`.
+# Custom domain (requires x402agentic.ai to be a zone in this Cloudflare account).
 routes = [
   { pattern = "api.x402agentic.ai", custom_domain = true }
 ]
 
 [vars]
 PRICE_USDC = "0.001"
-NETWORK = "base"          # "base" = mainnet (CDP facilitator) | "base-sepolia" = testnet (x402.org)
+# NETWORK_CAIP2 defaults to Base mainnet (eip155:8453) in code; override here if needed.
+# NETWORK_CAIP2 = "eip155:8453"
 
-# Set these as SECRETS, not vars (encrypted, never in your repo):
+# Secrets (encrypted — set with `wrangler secret put`, never commit):
 #   wrangler secret put PAY_TO
 #   wrangler secret put CDP_API_KEY_ID
 #   wrangler secret put CDP_API_KEY_SECRET
