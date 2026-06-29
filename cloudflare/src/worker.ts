@@ -32,8 +32,11 @@ const DESC = "x402Agentic pre-pay precheck — allow/warn/block risk verdict bef
 
 // ---- Brand / provider metadata (edit here to update everywhere) ------------
 const PROVIDER = {
-  name: "x402Agentic",
-  description: DESC,
+  name: "x402 Agentic",
+  tagline: "The Payment Layer for the Autonomous Web",
+  description:
+    "x402 Agentic is open infrastructure for autonomous AI agent payments. Built on x402 Protocol V2 + ERC-8004. Any agent, enterprise, or individual transacts instantly with stablecoins over HTTP.",
+  email: "hello@x402agentic.ai",
   website: "https://x402agentic.ai",
   logo: "https://x402agentic.ai/logo.png",
   twitter: "@x402agentic",
@@ -66,6 +69,9 @@ app.get("/", (c) =>
     provider: PROVIDER,
   }),
 );
+
+// Favicon → redirect to the brand logo so directories can show an icon.
+app.get("/favicon.ico", (c) => c.redirect(PROVIDER.logo, 302));
 
 app.get("/.well-known/x402", (c) =>
   c.json({
@@ -113,29 +119,93 @@ app.get("/.well-known/agent-card.json", (c) => c.json(agentCard(c)));
 
 app.get("/openapi.json", (c) => {
   const pay = { price: `$${priceUsd(c)}`, network: net(c), asset: USDC_BASE, payTo: c.env.PAY_TO };
-  const op = (method: string) => ({
-    summary: "Pre-pay risk verdict for an x402 payment",
-    description: DESC,
-    operationId: `precheck_${method}`,
-    "x-payment-info": pay,
-    responses: {
-      "200": { description: "Risk verdict", content: { "application/json": { schema: { type: "object" } } } },
-      "402": { description: "Payment required (x402 challenge)" },
+
+  const categoryEnum = [
+    "llm-compact", "llm", "market-data", "crypto-data", "rpc", "scrape",
+    "web-search", "social-data", "data-enrichment", "image-gen", "video-gen",
+    "prediction", "identity", "generic",
+  ];
+
+  // What an agent sends to /precheck (used for both GET params and POST body).
+  const bodySchema = {
+    type: "object",
+    properties: {
+      challenge: { type: "object", description: "Raw 402 response body (with an accepts[] array). If sent, payTo/amount/asset/network are parsed from it." },
+      payTo: { type: "string", description: "Destination address from the 402 envelope", example: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" },
+      amount: { type: "number", description: "Price in USD the endpoint is asking for", example: 0.01 },
+      maxAmountRequired: { type: "string", description: "Price in atomic units (alternative to amount)" },
+      asset: { type: "string", description: "Settlement asset symbol or contract", example: "USDC" },
+      network: { type: "string", description: "Settlement network", example: "base" },
+      category: { type: "string", enum: categoryEnum, description: "Service category for price-band comparison", example: "llm" },
+      resource: { type: "string", description: "Endpoint URL being paid for" },
+      facilitator: { type: "string", description: "Facilitator URL/host from the 402 envelope" },
+      policy: {
+        type: "object",
+        description: "Optional caller spend policy",
+        properties: {
+          maxPerCallUsd: { type: "number" },
+          allowlist: { type: "array", items: { type: "string" } },
+          blocklist: { type: "array", items: { type: "string" } },
+          allowedNetworks: { type: "array", items: { type: "string" } },
+          allowedAssets: { type: "array", items: { type: "string" } },
+          maxRiskScore: { type: "number" },
+        },
+      },
     },
-  });
+  };
+
+  const getParams = [
+    { name: "payTo", in: "query", required: true, schema: { type: "string" }, example: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", description: "Destination address" },
+    { name: "amount", in: "query", required: true, schema: { type: "number" }, example: 0.01, description: "Price in USD" },
+    { name: "network", in: "query", required: true, schema: { type: "string" }, example: "base", description: "Settlement network" },
+    { name: "category", in: "query", required: false, schema: { type: "string", enum: categoryEnum }, example: "llm", description: "Service category" },
+    { name: "asset", in: "query", required: false, schema: { type: "string" }, example: "USDC" },
+    { name: "maxAmountRequired", in: "query", required: false, schema: { type: "string" } },
+    { name: "resource", in: "query", required: false, schema: { type: "string" } },
+    { name: "facilitator", in: "query", required: false, schema: { type: "string" } },
+  ];
+
+  const responses = {
+    "200": { description: "Risk verdict", content: { "application/json": { schema: { type: "object" } } } },
+    "402": { description: "Payment required (x402 challenge)" },
+  };
+
   return c.json({
     openapi: "3.1.0",
     info: {
-      title: "x402Agentic Precheck",
+      title: PROVIDER.name,
       version: "2.0.0",
-      description: DESC,
-      contact: { name: PROVIDER.name, url: PROVIDER.website },
+      summary: PROVIDER.tagline,
+      description: `${PROVIDER.description}\n\nThis endpoint: ${DESC}.`,
+      contact: { name: PROVIDER.name, url: PROVIDER.website, email: PROVIDER.email },
       "x-logo": { url: PROVIDER.logo },
       "x-provider": PROVIDER,
     },
     externalDocs: { description: "Medium", url: PROVIDER.medium },
     servers: [{ url: `https://${host(c)}` }],
-    paths: { "/precheck": { get: op("get"), post: op("post") } },
+    paths: {
+      "/precheck": {
+        get: {
+          summary: "Pre-pay risk verdict (query params)",
+          description: DESC,
+          operationId: "precheck_get",
+          "x-payment-info": pay,
+          parameters: getParams,
+          responses,
+        },
+        post: {
+          summary: "Pre-pay risk verdict (JSON body)",
+          description: DESC,
+          operationId: "precheck_post",
+          "x-payment-info": pay,
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: bodySchema } },
+          },
+          responses,
+        },
+      },
+    },
   });
 });
 
