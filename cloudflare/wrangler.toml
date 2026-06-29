@@ -9,7 +9,7 @@ routes = [
 ]
 
 [vars]
-PRICE_USDC = "0.001"
+PRICE_USDC = "0.10"
 # NETWORK_CAIP2 defaults to Base mainnet (eip155:8453) in code; override here if needed.
 # NETWORK_CAIP2 = "eip155:8453"
 
@@ -17,3 +17,14 @@ PRICE_USDC = "0.001"
 #   wrangler secret put PAY_TO
 #   wrangler secret put CDP_API_KEY_ID
 #   wrangler secret put CDP_API_KEY_SECRET
+
+# Denylist storage (OFAC sanctioned addresses + your own additions).
+# Create it:  npx wrangler kv namespace create RISK_KV
+# then paste the returned id below and uncomment:
+[[kv_namespaces]]
+binding = "RISK_KV"
+id = "6336ff3a2e3b4c4f832ccbaa3ec19c0b"
+
+# Auto-refresh the denylist weekly (Mondays 06:00 UTC).
+[triggers]
+crons = ["0 6 * * 1"]

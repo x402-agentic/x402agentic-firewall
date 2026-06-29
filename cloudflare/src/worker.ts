@@ -18,7 +18,7 @@ import { x402ResourceServer, HTTPFacilitatorClient } from "@x402/core/server";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { bazaarResourceServerExtension, declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { createFacilitatorConfig } from "@coinbase/x402";
-import { evaluate, type PrecheckInput } from "../../engine/core";
+import { evaluate, type PrecheckInput, type Overrides } from "../../engine/core";
 
 type Bindings = {
   PAY_TO: string;
@@ -26,6 +26,7 @@ type Bindings = {
   NETWORK_CAIP2?: string; // default Base mainnet eip155:8453
   CDP_API_KEY_ID?: string;
   CDP_API_KEY_SECRET?: string;
+  RISK_KV?: KVNamespace; // denylist + operator overrides
 };
 
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -306,28 +307,98 @@ app.use("/precheck", async (c, next) => {
   return cachedMw(c, next);
 });
 
-const run = (input: PrecheckInput) => evaluate(input);
+const run = (input: PrecheckInput, overrides: Overrides) => evaluate(input, overrides);
 
-app.get("/precheck", (c) => {
+// Load denylist + operator overrides from KV, cached ~5 min per isolate.
+let cachedOverrides: { data: Overrides; exp: number } | null = null;
+async function loadOverrides(env: Bindings): Promise<Overrides> {
+  const now = Date.now();
+  if (cachedOverrides && cachedOverrides.exp > now) return cachedOverrides.data;
+  const o: Overrides = {};
+  const kv = env.RISK_KV;
+  if (kv) {
+    try {
+      const [denied, reported, trusted, bands, ceiling] = await Promise.all([
+        kv.get("denied", "json"),
+        kv.get("reported", "json"),
+        kv.get("trusted", "json"),
+        kv.get("priceBands", "json"),
+        kv.get("ceilingUsd", "json"),
+      ]);
+      if (Array.isArray(denied)) o.denied = denied as string[];
+      if (Array.isArray(reported)) o.reportedFlags = reported as string[];
+      if (Array.isArray(trusted)) o.trustedPayees = trusted as string[];
+      if (bands && typeof bands === "object") o.priceBands = bands as any;
+      if (typeof ceiling === "number") o.absoluteCeilingUsd = ceiling;
+    } catch {
+      /* KV is best-effort; seed data still applies */
+    }
+  }
+  cachedOverrides = { data: o, exp: now + 300_000 };
+  return o;
+}
+
+app.get("/precheck", async (c) => {
+  const overrides = await loadOverrides(c.env);
   const q = new URL(c.req.url).searchParams;
   const g = (k: string) => q.get(k) ?? undefined;
   return c.json(
-    run({
-      payTo: g("payTo"),
-      amount: g("amount"),
-      maxAmountRequired: g("maxAmountRequired"),
-      asset: g("asset"),
-      network: g("network"),
-      resource: g("resource") ?? g("endpoint"),
-      facilitator: g("facilitator"),
-      category: g("category"),
-    }),
+    run(
+      {
+        payTo: g("payTo"),
+        amount: g("amount"),
+        maxAmountRequired: g("maxAmountRequired"),
+        asset: g("asset"),
+        network: g("network"),
+        resource: g("resource") ?? g("endpoint"),
+        facilitator: g("facilitator"),
+        category: g("category"),
+      },
+      overrides,
+    ),
   );
 });
 
 app.post("/precheck", async (c) => {
+  const overrides = await loadOverrides(c.env);
   const body = (await c.req.json().catch(() => ({}))) as PrecheckInput;
-  return c.json(run(body));
+  return c.json(run(body, overrides));
 });
 
-export default app;
+// ---- Scheduled denylist refresh (Cron Trigger) ----------------------------
+// Fetches the OFAC sanctioned-address lists and writes them to KV. Runs on the
+// schedule in wrangler.toml [triggers]. Never overwrites a good list with empty.
+const OFAC_BASE = "https://raw.githubusercontent.com/0xB10C/ofac-sanctioned-digital-currency-addresses/lists";
+const OFAC_FILES = ["ETH", "USDC", "USDT", "DAI"].map((s) => `sanctioned_addresses_${s}.txt`);
+const isEvmAddr = (a: string) => /^0x[0-9a-fA-F]{40}$/.test(a.trim());
+
+async function refreshDenylist(env: Bindings): Promise<number> {
+  if (!env.RISK_KV) return 0;
+  const all = new Set<string>();
+  for (const f of OFAC_FILES) {
+    try {
+      const res = await fetch(`${OFAC_BASE}/${f}`);
+      if (!res.ok) continue;
+      const text = await res.text();
+      for (const line of text.split("\n")) {
+        const a = line.trim();
+        if (isEvmAddr(a)) all.add(a.toLowerCase());
+      }
+    } catch {
+      /* skip this file on error, keep going */
+    }
+  }
+  if (all.size === 0) return 0; // safety: don't replace a good list with an empty one
+  const list = [...all].sort();
+  await env.RISK_KV.put("denied", JSON.stringify(list));
+  cachedOverrides = null; // bust this isolate's cache
+  console.log(`denylist refreshed: ${list.length} sanctioned addresses`);
+  return list.length;
+}
+
+export default {
+  fetch: (req: Request, env: Bindings, ctx: ExecutionContext) => app.fetch(req, env, ctx),
+  async scheduled(_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
+    ctx.waitUntil(refreshDenylist(env));
+  },
+};
