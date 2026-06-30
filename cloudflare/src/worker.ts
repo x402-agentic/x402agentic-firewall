@@ -365,12 +365,68 @@ async function loadOverrides(env: Bindings): Promise<Overrides> {
 }
 
 // ---- Free routes: health, metadata, discovery -----------------------------
-app.get("/", (c) => c.json({
+// Root: a human-friendly landing page for browsers, machine JSON for agents.
+function landingPage(c: any): string {
+  const cards = ENDPOINTS.map((ep) => {
+    const short = ep.desc.split(" Part of x402 Agentic")[0];
+    return `<a class="card" href="/openapi.json">
+      <div class="row"><span class="path">/${ep.slug}</span><span class="price">$${priceFor(c, ep)}</span></div>
+      <p>${short}</p></a>`;
+  }).join("");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${PROVIDER.name} — ${PROVIDER.tagline}</title>
+<meta name="description" content="${PROVIDER.description}">
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0a0b0d;color:#e7e9ea;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:860px;margin:0 auto;padding:48px 20px 80px}
+header{display:flex;align-items:center;gap:16px;margin-bottom:8px}
+header img{width:48px;height:48px;border-radius:10px}
+h1{font-size:26px;margin:0}
+.tag{color:#9aa0a6;margin:4px 0 28px}
+.lead{color:#c7cbd1;margin:0 0 32px;max-width:640px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px;margin-bottom:36px}
+.card{display:block;background:#15171b;border:1px solid #23262c;border-radius:12px;padding:16px;text-decoration:none;color:inherit;transition:border-color .15s}
+.card:hover{border-color:#3a7afe}
+.row{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.path{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;color:#fff}
+.price{font-size:13px;color:#3a7afe;font-weight:600}
+.card p{margin:0;font-size:14px;color:#9aa0a6}
+.how{background:#15171b;border:1px solid #23262c;border-radius:12px;padding:18px;margin-bottom:32px}
+.how h2{font-size:15px;margin:0 0 10px;color:#fff}
+pre{background:#0a0b0d;border:1px solid #23262c;border-radius:8px;padding:12px;overflow:auto;font-size:13px;margin:0}
+.links a{color:#3a7afe;text-decoration:none;margin-right:18px;font-size:14px}
+footer{margin-top:40px;color:#6b7177;font-size:13px}
+</style></head><body><div class="wrap">
+<header><img src="${PROVIDER.logo}" alt="logo" onerror="this.style.display='none'"><div><h1>${PROVIDER.name}</h1></div></header>
+<div class="tag">${PROVIDER.tagline}</div>
+<p class="lead">${PROVIDER.description}</p>
+<div class="grid">${cards}</div>
+<div class="how"><h2>How agents pay</h2>
+<pre>npx awal x402 pay "https://${host(c)}/precheck" \\
+  --query '{"payTo":"0x…","amount":0.01,"network":"base","category":"llm"}'</pre>
+<p style="font-size:13px;color:#9aa0a6;margin:10px 0 0">Keyless, pay-per-call in USDC on Base (x402 v2). No account, no API key.</p></div>
+<div class="links">
+<a href="${PROVIDER.website}">Website</a>
+<a href="${PROVIDER.x}">X</a>
+<a href="${PROVIDER.medium}">Medium</a>
+<a href="/openapi.json">OpenAPI</a>
+<a href="/.well-known/agent.json">Agent card</a></div>
+<footer>x402 v2 · settles USDC on Base · ${ENDPOINTS.length} endpoints</footer>
+</div></body></html>`;
+}
+
+app.get("/", (c) => {
+  if ((c.req.header("accept") ?? "").includes("text/html")) return c.html(landingPage(c));
+  return c.json({
   service: "x402-agentic", version: "2.0.0",
   paid_paths: ENDPOINTS.map((e) => `/${e.slug}`),
   network: net(c), provider: PROVIDER,
   discovery: ["/.well-known/x402", "/.well-known/agent.json", "/openapi.json", "/llms.txt"],
-}));
+});
+});
 
 app.get("/favicon.ico", (c) => c.redirect(PROVIDER.logo, 302));
 
