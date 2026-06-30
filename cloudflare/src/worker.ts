@@ -26,6 +26,9 @@ type Bindings = {
   PRICE_SCREEN?: string;
   PRICE_SPEND_GUARD?: string;
   PRICE_TOKEN_CHECK?: string;
+  PRICE_VERIFY_PAYMENT?: string;
+  PRICE_REPUTATION?: string;
+  BASE_RPC_URL?: string;          // default https://mainnet.base.org
   NETWORK_CAIP2?: string;         // default Base mainnet eip155:8453
   CDP_API_KEY_ID?: string;
   CDP_API_KEY_SECRET?: string;
@@ -45,6 +48,41 @@ const TOKEN_REGISTRY: Record<string, { symbol: string; name: string; decimals: n
 };
 
 const isEvm = (a: string) => /^0x[0-9a-f]{40}$/.test(a);
+
+// ERC-20 Transfer(address,address,uint256) event topic.
+const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+// Public Base RPC endpoints, tried in order (override/prepend via BASE_RPC_URL,
+// comma-separated). Public nodes rate-limit, so we fall through on failure.
+const DEFAULT_BASE_RPCS = [
+  "https://base.publicnode.com",
+  "https://base-rpc.publicnode.com",
+  "https://base.llamarpc.com",
+  "https://mainnet.base.org",
+  "https://1rpc.io/base",
+];
+
+// Try each RPC endpoint until one returns a result; throw an aggregated error.
+async function rpcCall(urls: string[], method: string, params: any[]): Promise<any> {
+  let lastErr = "no_rpc_endpoints";
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+      if (!res.ok) { lastErr = `http_${res.status}`; continue; }
+      const j: any = await res.json();
+      if (j.error) { lastErr = `rpc:${j.error.message ?? "error"}`; continue; }
+      return j.result; // success (may be null for a not-yet-mined tx)
+    } catch (e: any) {
+      lastErr = e?.message ? String(e.message) : "fetch_failed";
+      continue;
+    }
+  }
+  throw new Error(lastErr);
+}
 
 // ---- Provider / brand -----------------------------------------------------
 const PROVIDER = {
@@ -183,6 +221,112 @@ const ENDPOINTS: Endpoint[] = [
       const hit = TOKEN_REGISTRY[address];
       if (hit) return { address, valid: true, canonical: true, symbol: hit.symbol, name: hit.name, decimals: hit.decimals, network: "eip155:8453", verdict: "allow" };
       return { address, valid: true, canonical: false, verdict: "warn", warning: "not a known canonical asset — possible lookalike/spoof; verify before accepting payment in this token" };
+    },
+  },
+  {
+    slug: "verify-payment",
+    priceDefault: "0.005",
+    desc: "Confirm an x402 payment settled on-chain: right recipient, asset, and amount",
+    inputExample: { txHash: "0x" + "ab".repeat(32), payTo: "0xc23C4aFA42cbaBbc03D04Bc87ecB769Fc82F1f43", amountUsd: 0.1 },
+    inputSchema: {
+      type: "object",
+      properties: {
+        txHash: { type: "string", description: "Transaction hash to verify (0x + 64 hex)" },
+        payTo: { type: "string", description: "Expected recipient address" },
+        amountUsd: { type: "number", description: "Expected amount in USD (optional)" },
+        asset: { type: "string", description: "Token contract (defaults to USDC on Base)" },
+      },
+      required: ["txHash"],
+    },
+    outputExample: { txHash: "0x…", settled: true, verified: true, to: "0xc23c…", amountUsd: 0.1, verdict: "allow" },
+    run: async (params, { env }) => {
+      const txHash = String(params.txHash ?? params.tx ?? params.hash ?? "").trim();
+      if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) return { txHash, verified: false, verdict: "block", reason: "invalid_tx_hash" };
+      const expectedTo = String(params.payTo ?? params.to ?? "").toLowerCase();
+      const expectedAmount = params.amountUsd != null ? Number(params.amountUsd) : (params.amount != null ? Number(params.amount) : null);
+      const assetAddr = String(params.asset ?? USDC_BASE).toLowerCase();
+      const rpcs = (env.BASE_RPC_URL ? env.BASE_RPC_URL.split(",").map((s) => s.trim()).filter(Boolean) : []).concat(DEFAULT_BASE_RPCS);
+      let receipt: any;
+      try { receipt = await rpcCall(rpcs, "eth_getTransactionReceipt", [txHash]); }
+      catch (e: any) { return { txHash, verified: false, verdict: "warn", reason: "rpc_error", detail: String(e?.message ?? e).slice(0, 200) }; }
+      if (!receipt) return { txHash, verified: false, verdict: "warn", reason: "not_found_or_pending" };
+      if (receipt.status !== "0x1") return { txHash, settled: false, verified: false, verdict: "block", reason: "tx_failed" };
+      const transfers = (receipt.logs ?? []).filter(
+        (l: any) => l.address?.toLowerCase() === assetAddr && l.topics?.[0]?.toLowerCase() === TRANSFER_TOPIC,
+      );
+      let chosen: { to: string; data: string } | null = null;
+      for (const l of transfers) {
+        const to = "0x" + String(l.topics[2] ?? "").slice(-40).toLowerCase();
+        if (!expectedTo || to === expectedTo) { chosen = { to, data: l.data }; break; }
+      }
+      if (!chosen) {
+        if (transfers.length === 0) return { txHash, settled: true, verified: false, verdict: "warn", reason: "no_matching_token_transfer", asset: assetAddr };
+        return { txHash, settled: true, verified: false, verdict: "block", reason: "recipient_mismatch", asset: assetAddr };
+      }
+      const decimals = assetAddr === USDC_BASE.toLowerCase() ? 6 : 18; // USDC=6; others best-effort
+      const atomic = BigInt(chosen.data);
+      const amountUsd = Number(atomic) / 10 ** decimals;
+      const matchesPayTo = !expectedTo || chosen.to === expectedTo;
+      const matchesAmount = expectedAmount == null || Math.abs(amountUsd - expectedAmount) < 1e-6;
+      return {
+        txHash, settled: true, verified: matchesPayTo && matchesAmount,
+        verdict: matchesPayTo && matchesAmount ? "allow" : "warn",
+        to: chosen.to, asset: assetAddr, amountUsd, amountAtomic: atomic.toString(),
+        blockNumber: parseInt(receipt.blockNumber, 16),
+        expected: { payTo: expectedTo || null, amountUsd: expectedAmount },
+        matches: { payTo: matchesPayTo, amount: matchesAmount },
+      };
+    },
+  },
+  {
+    slug: "reputation",
+    priceDefault: "0.002",
+    desc: "Reputation score for a payee — sanctions, community reports/vouches, trust",
+    needsOverrides: true,
+    inputExample: { address: USDC_BASE },
+    inputSchema: {
+      type: "object",
+      properties: {
+        address: { type: "string", description: "Address to look up (GET) or contribute a signal for (POST)" },
+        action: { type: "string", enum: ["report", "vouch"], description: "POST only: report or vouch for the address" },
+        reason: { type: "string", description: "POST only: short note (<=140 chars)" },
+      },
+      required: ["address"],
+    },
+    outputExample: { address: USDC_BASE.toLowerCase(), score: 50, label: "unknown", reports: 0, vouches: 0, verdict: "neutral" },
+    run: async (params, { env, method, overrides }) => {
+      const address = String(params.address ?? params.payTo ?? "").toLowerCase();
+      if (!isEvm(address)) return { address, verdict: "block", reason: "invalid_address" };
+      const denied = overrides.denied ?? [];
+      const trusted = overrides.trustedPayees ?? [];
+      const key = `rep:${address}`;
+      const rec: any = (env.RISK_KV ? ((await env.RISK_KV.get(key, "json")) as any) : null) ?? { reports: 0, vouches: 0, firstSeen: null, lastSeen: null, reasons: [] };
+      if (method === "POST" && env.RISK_KV) {
+        const action = String(params.action ?? "report");
+        const reason = String(params.reason ?? "").slice(0, 140);
+        const now = new Date().toISOString();
+        if (!rec.firstSeen) rec.firstSeen = now;
+        rec.lastSeen = now;
+        if (action === "vouch") rec.vouches = (rec.vouches || 0) + 1;
+        else {
+          rec.reports = (rec.reports || 0) + 1;
+          if (reason) rec.reasons = [...(rec.reasons || []).slice(-9), reason];
+          const reported = ((await env.RISK_KV.get("reported", "json")) as string[]) ?? [];
+          if (!reported.includes(address)) { reported.push(address); await env.RISK_KV.put("reported", JSON.stringify(reported)); }
+        }
+        await env.RISK_KV.put(key, JSON.stringify(rec));
+      }
+      const sanctioned = denied.includes(address);
+      const isTrusted = trusted.includes(address);
+      const reports = rec.reports || 0;
+      const vouches = rec.vouches || 0;
+      let score: number, label: string, verdict: string;
+      if (sanctioned) { score = 0; label = "sanctioned"; verdict = "block"; }
+      else if (reports > 0) { score = Math.max(5, 40 - reports * 5); label = "reported"; verdict = "warn"; }
+      else if (isTrusted) { score = 95; label = "trusted"; verdict = "allow"; }
+      else if (vouches > 0) { score = Math.min(85, 55 + vouches * 5); label = "vouched"; verdict = "allow"; }
+      else { score = 50; label = "unknown"; verdict = "neutral"; }
+      return { address, score, label, verdict, sanctioned, trusted: isTrusted, reports, vouches, reasons: rec.reasons ?? [], firstSeen: rec.firstSeen, lastSeen: rec.lastSeen };
     },
   },
 ];

@@ -13,8 +13,12 @@ PRICE_USDC = "0.10"
 PRICE_SCREEN = "0.02"
 PRICE_SPEND_GUARD = "0.01"
 PRICE_TOKEN_CHECK = "0.02"
+PRICE_VERIFY_PAYMENT = "0.05"
+PRICE_REPUTATION = "0.02"
+BASE_RPC_URL = "https://base-mainnet.g.alchemy.com/v2/p87pDq8KKJCTwOHdoRWH_"
 # NETWORK_CAIP2 defaults to Base mainnet (eip155:8453) in code; override here if needed.
 # NETWORK_CAIP2 = "eip155:8453"
+
 
 # Secrets (encrypted — set with `wrangler secret put`, never commit):
 #   wrangler secret put PAY_TO
