@@ -1,15 +1,14 @@
 /**
- * x402Agentic Payment Pre-Flight Check — Cloudflare Worker (x402 v2 + brand metadata).
+ * x402 Agentic — multi-endpoint payment-trust suite (Cloudflare Worker, x402 v2).
  *
- * v2 paywall (settles via Coinbase CDP on Base mainnet). The risk engine
- * (engine/core.ts) runs only after payment verifies.
+ * Paid endpoints (each its own price, all settle USDC on Base via CDP):
+ *   /precheck     full pre-pay risk verdict (engine/core.ts)
+ *   /screen       focused OFAC sanctions screen on one address
+ *   /spend-guard  per-agent budget enforcement (stateful, KV)
+ *   /token-check  is this the canonical USDC/asset, or a lookalike?
  *
- * Brand/provider metadata (logo, links, token) is exposed for directories at:
- *   GET /                       summary + provider
- *   GET /.well-known/x402       x402 discovery doc + provider
- *   GET /.well-known/agent.json agent card (alias: /.well-known/agent-card.json)
- *   GET /openapi.json           OpenAPI 3.1 with x-logo / x-provider / x-payment-info
- *   GET /llms.txt               plain-text summary for LLM crawlers
+ * Free routes: /, /favicon.ico, /.well-known/x402, /.well-known/agent.json,
+ *   /openapi.json, /llms.txt  — all generated from the ENDPOINTS registry.
  */
 
 import { Hono } from "hono";
@@ -22,69 +21,32 @@ import { evaluate, type PrecheckInput, type Overrides } from "../../engine/core"
 
 type Bindings = {
   PAY_TO: string;
-  PRICE_USDC?: string;
-  NETWORK_CAIP2?: string; // default Base mainnet eip155:8453
+  PRICE_USDC?: string;            // legacy: applies to /precheck if PRICE_PRECHECK unset
+  PRICE_PRECHECK?: string;
+  PRICE_SCREEN?: string;
+  PRICE_SPEND_GUARD?: string;
+  PRICE_TOKEN_CHECK?: string;
+  NETWORK_CAIP2?: string;         // default Base mainnet eip155:8453
   CDP_API_KEY_ID?: string;
   CDP_API_KEY_SECRET?: string;
-  RISK_KV?: KVNamespace; // denylist + operator overrides
+  RISK_KV?: KVNamespace;          // denylist, overrides, and spend-guard state
 };
 
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-const DESC = "x402Agentic pre-pay precheck — allow/warn/block risk verdict before paying any x402 endpoint";
 
-// Bazaar discovery extension: example input + output + schema for nicer listings.
-const CATEGORY_ENUM = [
-  "llm-compact", "llm", "market-data", "crypto-data", "rpc", "scrape",
-  "web-search", "social-data", "data-enrichment", "image-gen", "video-gen",
-  "prediction", "identity", "generic",
-];
-const DISCOVERY = declareDiscoveryExtension({
-  input: {
-    payTo: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    amount: 0.01,
-    network: "base",
-    category: "llm",
-  },
-  inputSchema: {
-    type: "object",
-    properties: {
-      payTo: { type: "string", description: "Destination address from the 402 envelope" },
-      amount: { type: "number", description: "Price in USD the endpoint is asking for" },
-      network: { type: "string", description: "Settlement network" },
-      category: { type: "string", enum: CATEGORY_ENUM, description: "Service category for price-band comparison" },
-    },
-    required: ["payTo", "amount", "network"],
-  },
-  output: {
-    example: {
-      verdict: "allow",
-      recommendation: "proceed",
-      riskScore: 0,
-      payTo: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-      amountUsd: 0.01,
-      category: "llm",
-      priceBand: { p50: 0.002, p90: 0.05, max: 0.2 },
-      flags: [],
-    },
-    schema: {
-      type: "object",
-      properties: {
-        verdict: { type: "string", enum: ["allow", "warn", "block"] },
-        recommendation: { type: "string", enum: ["proceed", "proceed_with_caution", "do_not_pay"] },
-        riskScore: { type: "number" },
-        payTo: { type: "string" },
-        amountUsd: { type: "number" },
-        category: { type: "string" },
-        priceBand: { type: "object" },
-        checks: { type: "array", items: { type: "object" } },
-        flags: { type: "array", items: { type: "string" } },
-      },
-      required: ["verdict", "recommendation", "riskScore"],
-    },
-  },
-});
+// Canonical token registry for /token-check (Base mainnet).
+// NOTE: verify/extend against an authoritative source before relying in production.
+const TOKEN_REGISTRY: Record<string, { symbol: string; name: string; decimals: number }> = {
+  "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": { symbol: "USDC", name: "USD Coin (native, Base)", decimals: 6 },
+  "0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca": { symbol: "USDbC", name: "USD Base Coin (bridged)", decimals: 6 },
+  "0x50c5725949a6f0c72e6c4a641f24049a917db0cb": { symbol: "DAI", name: "Dai Stablecoin (Base)", decimals: 18 },
+  "0x4200000000000000000000000000000000000006": { symbol: "WETH", name: "Wrapped Ether (Base)", decimals: 18 },
+  "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf": { symbol: "cbBTC", name: "Coinbase Wrapped BTC (Base)", decimals: 8 },
+};
 
-// ---- Brand / provider metadata (edit here to update everywhere) ------------
+const isEvm = (a: string) => /^0x[0-9a-f]{40}$/.test(a);
+
+// ---- Provider / brand -----------------------------------------------------
 const PROVIDER = {
   name: "x402 Agentic",
   tagline: "The Payment Layer for the Autonomous Web",
@@ -97,219 +59,144 @@ const PROVIDER = {
   x: "https://x.com/x402agentic",
   medium: "https://x402agentic.medium.com",
   virtuals: "https://app.virtuals.io/virtuals/39918",
-  token: {
-    address: "0xCAb815D8A171091A8647F126E0FB7C009946b162",
-    network: "eip155:8453",
-    chain: "base",
-  },
+  token: { address: "0xCAb815D8A171091A8647F126E0FB7C009946b162", network: "eip155:8453", chain: "base" },
 };
 
-const app = new Hono<{ Bindings: Bindings }>();
+// ===========================================================================
+// Endpoint registry — add an entry here and routes/metadata/pricing follow.
+// ===========================================================================
+type Ctx = { env: Bindings; overrides: Overrides; method: "GET" | "POST" };
+interface Endpoint {
+  slug: string;
+  priceDefault: string;
+  desc: string;
+  needsOverrides?: boolean;
+  inputExample: Record<string, any>;
+  inputSchema: { type: "object"; properties: Record<string, any>; required: string[] };
+  outputExample: Record<string, any>;
+  run: (params: any, ctx: Ctx) => any;
+}
 
-const priceUsd = (c: any) => c.env.PRICE_USDC ?? "0.001";
+const CATEGORY_ENUM = [
+  "llm-compact", "llm", "market-data", "crypto-data", "rpc", "scrape", "web-search",
+  "social-data", "data-enrichment", "image-gen", "video-gen", "prediction", "identity", "generic",
+];
+
+const ENDPOINTS: Endpoint[] = [
+  {
+    slug: "precheck",
+    priceDefault: "0.001",
+    desc: "Full pre-pay risk verdict (allow/warn/block) before paying any x402 endpoint",
+    needsOverrides: true,
+    inputExample: { payTo: USDC_BASE, amount: 0.01, network: "base", category: "llm" },
+    inputSchema: {
+      type: "object",
+      properties: {
+        payTo: { type: "string", description: "Destination address from the 402 envelope" },
+        amount: { type: "number", description: "Price in USD the endpoint is asking for" },
+        network: { type: "string", description: "Settlement network" },
+        category: { type: "string", enum: CATEGORY_ENUM, description: "Service category for price-band comparison" },
+      },
+      required: ["payTo", "amount", "network"],
+    },
+    outputExample: { verdict: "allow", recommendation: "proceed", riskScore: 0, flags: [] },
+    run: (params, { overrides }) => evaluate(params as PrecheckInput, overrides),
+  },
+  {
+    slug: "screen",
+    priceDefault: "0.002",
+    desc: "OFAC sanctions screen: is this address on the sanctioned list?",
+    needsOverrides: true,
+    inputExample: { address: USDC_BASE },
+    inputSchema: {
+      type: "object",
+      properties: { address: { type: "string", description: "EVM address to screen" } },
+      required: ["address"],
+    },
+    outputExample: { address: USDC_BASE.toLowerCase(), valid: true, sanctioned: false, list: "OFAC", verdict: "allow" },
+    run: (params, { overrides }) => {
+      const address = String(params.address ?? params.payTo ?? "").toLowerCase();
+      const valid = isEvm(address);
+      const denied = overrides.denied ?? [];
+      const sanctioned = valid && denied.includes(address);
+      const reasons: string[] = [];
+      let verdict: "allow" | "block" = "allow";
+      if (!valid) { verdict = "block"; reasons.push("invalid_address"); }
+      else if (sanctioned) { verdict = "block"; reasons.push("ofac_sanctioned"); }
+      return {
+        address, valid, sanctioned, verdict, reasons,
+        list: "OFAC sanctioned digital-currency addresses", listSize: denied.length,
+      };
+    },
+  },
+  {
+    slug: "spend-guard",
+    priceDefault: "0.001",
+    desc: "Per-agent budget enforcement: track cumulative spend against a budget",
+    inputExample: { agentId: "agent-123", amountUsd: 0.25, budgetUsd: 10 },
+    inputSchema: {
+      type: "object",
+      properties: {
+        agentId: { type: "string", description: "Stable identifier for the spending agent" },
+        amountUsd: { type: "number", description: "Amount about to be spent (USD)" },
+        budgetUsd: { type: "number", description: "Optional: set/raise this agent's budget (USD)" },
+      },
+      required: ["agentId"],
+    },
+    outputExample: { agentId: "agent-123", amountUsd: 0.25, budgetUsd: 10, spentUsd: 0.25, remainingUsd: 9.75, allowed: true, recorded: true, verdict: "allow" },
+    run: async (params, { env, method }) => {
+      const agentId = String(params.agentId ?? params.agent ?? "").trim();
+      if (!agentId) return { error: "missing_agentId" };
+      if (!env.RISK_KV) return { error: "kv_unavailable" };
+      const key = `spend:${agentId}`;
+      const state = ((await env.RISK_KV.get(key, "json")) as any) ?? { spent: 0, budget: null, since: new Date().toISOString() };
+      const amount = Number(params.amountUsd ?? params.amount ?? 0) || 0;
+      const setBudget = params.budgetUsd ?? params.budget;
+      if (setBudget != null && !Number.isNaN(Number(setBudget))) state.budget = Number(setBudget);
+      const budget: number | null = state.budget;
+      const remainingBefore = budget != null ? Math.max(0, budget - state.spent) : null;
+      const allowed = budget == null || amount <= remainingBefore!;
+      let recorded = false;
+      if (method === "POST" && amount > 0 && allowed) {
+        state.spent = Number((state.spent + amount).toFixed(6));
+        await env.RISK_KV.put(key, JSON.stringify(state));
+        recorded = true;
+      }
+      const remainingUsd = budget != null ? Math.max(0, budget - state.spent) : null;
+      return { agentId, amountUsd: amount, budgetUsd: budget, spentUsd: state.spent, remainingUsd, allowed, recorded, verdict: allowed ? "allow" : "block" };
+    },
+  },
+  {
+    slug: "token-check",
+    priceDefault: "0.002",
+    desc: "Verify a token contract is the canonical asset (e.g. real USDC) vs a lookalike",
+    inputExample: { address: USDC_BASE },
+    inputSchema: {
+      type: "object",
+      properties: { address: { type: "string", description: "Token contract address to verify" } },
+      required: ["address"],
+    },
+    outputExample: { address: USDC_BASE.toLowerCase(), valid: true, canonical: true, symbol: "USDC", decimals: 6, verdict: "allow" },
+    run: (params) => {
+      const address = String(params.address ?? params.token ?? params.asset ?? "").toLowerCase();
+      if (!isEvm(address)) return { address, valid: false, canonical: false, verdict: "block", warning: "invalid_address" };
+      const hit = TOKEN_REGISTRY[address];
+      if (hit) return { address, valid: true, canonical: true, symbol: hit.symbol, name: hit.name, decimals: hit.decimals, network: "eip155:8453", verdict: "allow" };
+      return { address, valid: true, canonical: false, verdict: "warn", warning: "not a known canonical asset — possible lookalike/spoof; verify before accepting payment in this token" };
+    },
+  },
+];
+
+// ---- Helpers --------------------------------------------------------------
+const app = new Hono<{ Bindings: Bindings }>();
 const net = (c: any) => c.env.NETWORK_CAIP2 ?? "eip155:8453";
 const host = (c: any) => new URL(c.req.url).host;
+const priceFor = (c: any, ep: Endpoint) => {
+  const k = "PRICE_" + ep.slug.toUpperCase().replace(/-/g, "_");
+  return (c.env as any)[k] ?? (ep.slug === "precheck" ? c.env.PRICE_USDC : undefined) ?? ep.priceDefault;
+};
 
-// ---- Free routes: health, discovery, metadata -----------------------------
-
-app.get("/", (c) =>
-  c.json({
-    service: "x402agentic-precheck",
-    version: "2.0.0",
-    paid_paths: ["/precheck"],
-    price_usdc: priceUsd(c),
-    network: net(c),
-    discovery: ["/.well-known/x402", "/.well-known/agent.json", "/openapi.json", "/llms.txt"],
-    provider: PROVIDER,
-  }),
-);
-
-// Favicon → redirect to the brand logo so directories can show an icon.
-app.get("/favicon.ico", (c) => c.redirect(PROVIDER.logo, 302));
-
-app.get("/.well-known/x402", (c) =>
-  c.json({
-    x402Version: 2,
-    provider: PROVIDER,
-    resources: [
-      {
-        resource: `https://${host(c)}/precheck`,
-        methods: ["GET", "POST"],
-        accepts: [{ scheme: "exact", price: `$${priceUsd(c)}`, network: net(c), asset: USDC_BASE, payTo: c.env.PAY_TO }],
-        description: DESC,
-        mimeType: "application/json",
-      },
-    ],
-  }),
-);
-
-// Agent card (served at both common paths)
-const agentCard = (c: any) => ({
-  name: PROVIDER.name,
-  description: DESC,
-  url: PROVIDER.website,
-  logo: PROVIDER.logo,
-  iconUrl: PROVIDER.logo,
-  provider: { organization: PROVIDER.name, url: PROVIDER.website },
-  links: {
-    website: PROVIDER.website,
-    x: PROVIDER.x,
-    twitter: PROVIDER.twitter,
-    medium: PROVIDER.medium,
-    virtuals: PROVIDER.virtuals,
-  },
-  token: PROVIDER.token,
-  endpoints: [
-    {
-      path: "/precheck",
-      methods: ["GET", "POST"],
-      description: DESC,
-      pricing: { amount: priceUsd(c), currency: "USDC", network: net(c), asset: USDC_BASE },
-    },
-  ],
-});
-app.get("/.well-known/agent.json", (c) => c.json(agentCard(c)));
-app.get("/.well-known/agent-card.json", (c) => c.json(agentCard(c)));
-
-app.get("/openapi.json", (c) => {
-  const pay = { price: `$${priceUsd(c)}`, network: net(c), asset: USDC_BASE, payTo: c.env.PAY_TO };
-
-  const categoryEnum = [
-    "llm-compact", "llm", "market-data", "crypto-data", "rpc", "scrape",
-    "web-search", "social-data", "data-enrichment", "image-gen", "video-gen",
-    "prediction", "identity", "generic",
-  ];
-
-  // What an agent sends to /precheck (used for both GET params and POST body).
-  const bodySchema = {
-    type: "object",
-    properties: {
-      challenge: { type: "object", description: "Raw 402 response body (with an accepts[] array). If sent, payTo/amount/asset/network are parsed from it." },
-      payTo: { type: "string", description: "Destination address from the 402 envelope", example: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" },
-      amount: { type: "number", description: "Price in USD the endpoint is asking for", example: 0.01 },
-      maxAmountRequired: { type: "string", description: "Price in atomic units (alternative to amount)" },
-      asset: { type: "string", description: "Settlement asset symbol or contract", example: "USDC" },
-      network: { type: "string", description: "Settlement network", example: "base" },
-      category: { type: "string", enum: categoryEnum, description: "Service category for price-band comparison", example: "llm" },
-      resource: { type: "string", description: "Endpoint URL being paid for" },
-      facilitator: { type: "string", description: "Facilitator URL/host from the 402 envelope" },
-      policy: {
-        type: "object",
-        description: "Optional caller spend policy",
-        properties: {
-          maxPerCallUsd: { type: "number" },
-          allowlist: { type: "array", items: { type: "string" } },
-          blocklist: { type: "array", items: { type: "string" } },
-          allowedNetworks: { type: "array", items: { type: "string" } },
-          allowedAssets: { type: "array", items: { type: "string" } },
-          maxRiskScore: { type: "number" },
-        },
-      },
-    },
-  };
-
-  const getParams = [
-    { name: "payTo", in: "query", required: true, schema: { type: "string" }, example: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", description: "Destination address" },
-    { name: "amount", in: "query", required: true, schema: { type: "number" }, example: 0.01, description: "Price in USD" },
-    { name: "network", in: "query", required: true, schema: { type: "string" }, example: "base", description: "Settlement network" },
-    { name: "category", in: "query", required: false, schema: { type: "string", enum: categoryEnum }, example: "llm", description: "Service category" },
-    { name: "asset", in: "query", required: false, schema: { type: "string" }, example: "USDC" },
-    { name: "maxAmountRequired", in: "query", required: false, schema: { type: "string" } },
-    { name: "resource", in: "query", required: false, schema: { type: "string" } },
-    { name: "facilitator", in: "query", required: false, schema: { type: "string" } },
-  ];
-
-  const responses = {
-    "200": { description: "Risk verdict", content: { "application/json": { schema: { type: "object" } } } },
-    "402": { description: "Payment required (x402 challenge)" },
-  };
-
-  return c.json({
-    openapi: "3.1.0",
-    info: {
-      title: PROVIDER.name,
-      version: "2.0.0",
-      summary: PROVIDER.tagline,
-      description: `${PROVIDER.description}\n\nThis endpoint: ${DESC}.`,
-      contact: { name: PROVIDER.name, url: PROVIDER.website, email: PROVIDER.email },
-      "x-logo": { url: PROVIDER.logo },
-      "x-provider": PROVIDER,
-    },
-    externalDocs: { description: "Medium", url: PROVIDER.medium },
-    servers: [{ url: `https://${host(c)}` }],
-    paths: {
-      "/precheck": {
-        get: {
-          summary: "Pre-pay risk verdict (query params)",
-          description: DESC,
-          operationId: "precheck_get",
-          "x-payment-info": pay,
-          parameters: getParams,
-          responses,
-        },
-        post: {
-          summary: "Pre-pay risk verdict (JSON body)",
-          description: DESC,
-          operationId: "precheck_post",
-          "x-payment-info": pay,
-          requestBody: {
-            required: true,
-            content: { "application/json": { schema: bodySchema } },
-          },
-          responses,
-        },
-      },
-    },
-  });
-});
-
-app.get("/llms.txt", (c) =>
-  c.text(
-    [
-      `# ${PROVIDER.name}`,
-      "",
-      DESC,
-      "",
-      `Website: ${PROVIDER.website}`,
-      `X: ${PROVIDER.twitter} (${PROVIDER.x})`,
-      `Medium: ${PROVIDER.medium}`,
-      `Virtuals: ${PROVIDER.virtuals}`,
-      `Token (Base): ${PROVIDER.token.address}`,
-      "",
-      `Paid endpoint: https://${host(c)}/precheck  (${`$${priceUsd(c)}`} USDC on Base, x402 v2)`,
-      `Discovery: /.well-known/x402, /.well-known/agent.json, /openapi.json`,
-    ].join("\n"),
-  ),
-);
-
-// ---- Paid route -----------------------------------------------------------
-
-let cachedMw: any; // built once per isolate (facilitator handshake is expensive)
-
-app.use("/precheck", async (c, next) => {
-  if (!c.env.CDP_API_KEY_ID || !c.env.CDP_API_KEY_SECRET) {
-    return c.json({ error: "missing_cdp_keys", detail: "Set CDP_API_KEY_ID and CDP_API_KEY_SECRET secrets." }, 500);
-  }
-  if (!cachedMw) {
-    const facilitatorClient = new HTTPFacilitatorClient(
-      createFacilitatorConfig(c.env.CDP_API_KEY_ID, c.env.CDP_API_KEY_SECRET),
-    );
-    const server = new x402ResourceServer(facilitatorClient);
-    server.register("eip155:*", new ExactEvmScheme());
-    server.registerExtension(bazaarResourceServerExtension);
-    const accepts = [{ scheme: "exact", price: `$${priceUsd(c)}`, network: net(c), payTo: c.env.PAY_TO as `0x${string}` }];
-    const routes = {
-      "GET /precheck": { accepts, description: DESC, mimeType: "application/json", extensions: { ...DISCOVERY } },
-      "POST /precheck": { accepts, description: DESC, mimeType: "application/json", extensions: { ...DISCOVERY } },
-    };
-    cachedMw = paymentMiddleware(routes as any, server as any);
-  }
-  return cachedMw(c, next);
-});
-
-const run = (input: PrecheckInput, overrides: Overrides) => evaluate(input, overrides);
-
-// Load denylist + operator overrides from KV, cached ~5 min per isolate.
+// ---- KV overrides (denylist etc.), cached ~5 min per isolate ---------------
 let cachedOverrides: { data: Overrides; exp: number } | null = null;
 async function loadOverrides(env: Bindings): Promise<Overrides> {
   const now = Date.now();
@@ -319,59 +206,135 @@ async function loadOverrides(env: Bindings): Promise<Overrides> {
   if (kv) {
     try {
       const [denied, reported, trusted, bands, ceiling] = await Promise.all([
-        kv.get("denied", "json"),
-        kv.get("reported", "json"),
-        kv.get("trusted", "json"),
-        kv.get("priceBands", "json"),
-        kv.get("ceilingUsd", "json"),
+        kv.get("denied", "json"), kv.get("reported", "json"), kv.get("trusted", "json"),
+        kv.get("priceBands", "json"), kv.get("ceilingUsd", "json"),
       ]);
       if (Array.isArray(denied)) o.denied = denied as string[];
       if (Array.isArray(reported)) o.reportedFlags = reported as string[];
       if (Array.isArray(trusted)) o.trustedPayees = trusted as string[];
       if (bands && typeof bands === "object") o.priceBands = bands as any;
       if (typeof ceiling === "number") o.absoluteCeilingUsd = ceiling;
-    } catch {
-      /* KV is best-effort; seed data still applies */
-    }
+    } catch { /* best-effort */ }
   }
   cachedOverrides = { data: o, exp: now + 300_000 };
   return o;
 }
 
-app.get("/precheck", async (c) => {
-  const overrides = await loadOverrides(c.env);
-  const q = new URL(c.req.url).searchParams;
-  const g = (k: string) => q.get(k) ?? undefined;
-  return c.json(
-    run(
-      {
-        payTo: g("payTo"),
-        amount: g("amount"),
-        maxAmountRequired: g("maxAmountRequired"),
-        asset: g("asset"),
-        network: g("network"),
-        resource: g("resource") ?? g("endpoint"),
-        facilitator: g("facilitator"),
-        category: g("category"),
-      },
-      overrides,
-    ),
-  );
+// ---- Free routes: health, metadata, discovery -----------------------------
+app.get("/", (c) => c.json({
+  service: "x402-agentic", version: "2.0.0",
+  paid_paths: ENDPOINTS.map((e) => `/${e.slug}`),
+  network: net(c), provider: PROVIDER,
+  discovery: ["/.well-known/x402", "/.well-known/agent.json", "/openapi.json", "/llms.txt"],
+}));
+
+app.get("/favicon.ico", (c) => c.redirect(PROVIDER.logo, 302));
+
+app.get("/.well-known/x402", (c) => c.json({
+  x402Version: 2, provider: PROVIDER,
+  resources: ENDPOINTS.map((ep) => ({
+    resource: `https://${host(c)}/${ep.slug}`, methods: ["GET", "POST"],
+    accepts: [{ scheme: "exact", price: `$${priceFor(c, ep)}`, network: net(c), asset: USDC_BASE, payTo: c.env.PAY_TO }],
+    description: ep.desc, mimeType: "application/json",
+  })),
+}));
+
+const agentCard = (c: any) => ({
+  name: PROVIDER.name, description: PROVIDER.description, url: PROVIDER.website,
+  logo: PROVIDER.logo, iconUrl: PROVIDER.logo,
+  provider: { organization: PROVIDER.name, url: PROVIDER.website },
+  links: { website: PROVIDER.website, x: PROVIDER.x, twitter: PROVIDER.twitter, medium: PROVIDER.medium, virtuals: PROVIDER.virtuals },
+  token: PROVIDER.token,
+  endpoints: ENDPOINTS.map((ep) => ({
+    path: `/${ep.slug}`, methods: ["GET", "POST"], description: ep.desc,
+    pricing: { amount: priceFor(c, ep), currency: "USDC", network: net(c), asset: USDC_BASE },
+  })),
+});
+app.get("/.well-known/agent.json", (c) => c.json(agentCard(c)));
+app.get("/.well-known/agent-card.json", (c) => c.json(agentCard(c)));
+
+app.get("/openapi.json", (c) => {
+  const paths: Record<string, any> = {};
+  for (const ep of ENDPOINTS) {
+    const pay = { price: `$${priceFor(c, ep)}`, network: net(c), asset: USDC_BASE, payTo: c.env.PAY_TO };
+    const responses = {
+      "200": { description: "Result", content: { "application/json": { schema: { type: "object" } } } },
+      "402": { description: "Payment required (x402 challenge)" },
+    };
+    const params = Object.entries(ep.inputSchema.properties).map(([name, s]) => ({
+      name, in: "query", required: ep.inputSchema.required.includes(name), schema: s,
+    }));
+    paths[`/${ep.slug}`] = {
+      get: { summary: ep.desc, operationId: `${ep.slug}_get`, "x-payment-info": pay, parameters: params, responses },
+      post: { summary: ep.desc, operationId: `${ep.slug}_post`, "x-payment-info": pay,
+        requestBody: { required: true, content: { "application/json": { schema: ep.inputSchema } } }, responses },
+    };
+  }
+  return c.json({
+    openapi: "3.1.0",
+    info: {
+      title: PROVIDER.name, version: "2.0.0", summary: PROVIDER.tagline,
+      description: PROVIDER.description,
+      contact: { name: PROVIDER.name, url: PROVIDER.website, email: PROVIDER.email },
+      "x-logo": { url: PROVIDER.logo }, "x-provider": PROVIDER,
+    },
+    externalDocs: { description: "Medium", url: PROVIDER.medium },
+    servers: [{ url: `https://${host(c)}` }],
+    paths,
+  });
 });
 
-app.post("/precheck", async (c) => {
-  const overrides = await loadOverrides(c.env);
-  const body = (await c.req.json().catch(() => ({}))) as PrecheckInput;
-  return c.json(run(body, overrides));
-});
+app.get("/llms.txt", (c) => c.text([
+  `# ${PROVIDER.name}`, "", PROVIDER.description, "",
+  `Website: ${PROVIDER.website}`, `X: ${PROVIDER.twitter}`, `Medium: ${PROVIDER.medium}`, "",
+  "Paid endpoints (USDC on Base, x402 v2):",
+  ...ENDPOINTS.map((e) => `  https://${host(c)}/${e.slug}  ($${priceFor(c, e)})  ${e.desc}`),
+].join("\n")));
+
+// ---- Paywall (one middleware covering every endpoint, cached per isolate) --
+let cachedMw: any;
+function buildMw(c: any) {
+  const fc = new HTTPFacilitatorClient(createFacilitatorConfig(c.env.CDP_API_KEY_ID, c.env.CDP_API_KEY_SECRET));
+  const server = new x402ResourceServer(fc);
+  server.register("eip155:*", new ExactEvmScheme());
+  server.registerExtension(bazaarResourceServerExtension);
+  const routes: Record<string, any> = {};
+  for (const ep of ENDPOINTS) {
+    const accepts = [{ scheme: "exact", price: `$${priceFor(c, ep)}`, network: net(c), payTo: c.env.PAY_TO as `0x${string}` }];
+    const disc = declareDiscoveryExtension({
+      input: ep.inputExample, inputSchema: ep.inputSchema,
+      output: { example: ep.outputExample, schema: { type: "object" } },
+    });
+    routes[`GET /${ep.slug}`] = { accepts, description: ep.desc, mimeType: "application/json", extensions: { ...disc } };
+    routes[`POST /${ep.slug}`] = { accepts, description: ep.desc, mimeType: "application/json", extensions: { ...disc } };
+  }
+  return paymentMiddleware(routes as any, server as any);
+}
+
+const payGuard = async (c: any, next: any) => {
+  if (!c.env.CDP_API_KEY_ID || !c.env.CDP_API_KEY_SECRET) return c.json({ error: "missing_cdp_keys" }, 500);
+  if (!cachedMw) cachedMw = buildMw(c);
+  return cachedMw(c, next);
+};
+
+// Register paywall on each paid path, then the handlers.
+for (const ep of ENDPOINTS) app.use(`/${ep.slug}`, payGuard);
+
+async function dispatch(ep: Endpoint, c: any, method: "GET" | "POST") {
+  const params = method === "GET"
+    ? Object.fromEntries(new URL(c.req.url).searchParams)
+    : await c.req.json().catch(() => ({}));
+  const overrides = ep.needsOverrides ? await loadOverrides(c.env) : {};
+  return ep.run(params, { env: c.env, overrides, method });
+}
+for (const ep of ENDPOINTS) {
+  app.get(`/${ep.slug}`, async (c) => c.json(await dispatch(ep, c, "GET")));
+  app.post(`/${ep.slug}`, async (c) => c.json(await dispatch(ep, c, "POST")));
+}
 
 // ---- Scheduled denylist refresh (Cron Trigger) ----------------------------
-// Fetches the OFAC sanctioned-address lists and writes them to KV. Runs on the
-// schedule in wrangler.toml [triggers]. Never overwrites a good list with empty.
 const OFAC_BASE = "https://raw.githubusercontent.com/0xB10C/ofac-sanctioned-digital-currency-addresses/lists";
 const OFAC_FILES = ["ETH", "USDC", "USDT", "DAI"].map((s) => `sanctioned_addresses_${s}.txt`);
-const isEvmAddr = (a: string) => /^0x[0-9a-fA-F]{40}$/.test(a.trim());
-
 async function refreshDenylist(env: Bindings): Promise<number> {
   if (!env.RISK_KV) return 0;
   const all = new Set<string>();
@@ -379,26 +342,22 @@ async function refreshDenylist(env: Bindings): Promise<number> {
     try {
       const res = await fetch(`${OFAC_BASE}/${f}`);
       if (!res.ok) continue;
-      const text = await res.text();
-      for (const line of text.split("\n")) {
+      for (const line of (await res.text()).split("\n")) {
         const a = line.trim();
-        if (isEvmAddr(a)) all.add(a.toLowerCase());
+        if (/^0x[0-9a-fA-F]{40}$/.test(a)) all.add(a.toLowerCase());
       }
-    } catch {
-      /* skip this file on error, keep going */
-    }
+    } catch { /* skip */ }
   }
-  if (all.size === 0) return 0; // safety: don't replace a good list with an empty one
-  const list = [...all].sort();
-  await env.RISK_KV.put("denied", JSON.stringify(list));
-  cachedOverrides = null; // bust this isolate's cache
-  console.log(`denylist refreshed: ${list.length} sanctioned addresses`);
-  return list.length;
+  if (all.size === 0) return 0;
+  await env.RISK_KV.put("denied", JSON.stringify([...all].sort()));
+  cachedOverrides = null;
+  console.log(`denylist refreshed: ${all.size} sanctioned addresses`);
+  return all.size;
 }
 
 export default {
   fetch: (req: Request, env: Bindings, ctx: ExecutionContext) => app.fetch(req, env, ctx),
-  async scheduled(_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
+  async scheduled(_e: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
     ctx.waitUntil(refreshDenylist(env));
   },
 };

@@ -4,7 +4,7 @@ Each check returns `pass` / `warn` / `fail`. Some failures are **critical** and
 force a `block` regardless of score. Otherwise the weighted score decides:
 
 - `block` if any critical failure **or** score ≥ 60
-- `warn` if score ≥ 25
+- `warn` if score ≥ 20
 - `allow` otherwise
 
 Score is capped at 100. A payee on the operator's trusted list subtracts 25
@@ -16,7 +16,7 @@ Score is capped at 100. A payee on the operator's trusted list subtracts 25
 | `address_validity` | yes | payTo is not a valid EVM (or plausible Solana) address | block |
 | `denylist_screen` | yes | payee on denylist | block |
 | `reported_flag` | yes | payee has community abuse reports | block |
-| `price_outlier` | no | amount > category `max` (fail) or > `p90` (warn) | 45 / 20 |
+| `price_outlier` | no | amount > category `max` (fail) or > `p90` (warn) | 60 / 20 |
 | `absolute_ceiling` | no | amount exceeds the absolute per-call ceiling (default $25) | 35 |
 | `asset_check` | no | settlement asset is not a recognized stablecoin for the network | 20 |
 | `network_check` | no | settlement network is unrecognized | 15 |

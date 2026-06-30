@@ -2,10 +2,12 @@
 
 ## One-line catalog description (for the README table row)
 
-**x402agentic · precheck** — Pre-pay risk firewall for x402 agents. Before paying
-any x402 endpoint, get an allow/warn/block verdict: validates the payee, screens
-denylist/flagged addresses, flags price gouging, checks asset/network, and
-enforces your spend policy. ~$0.001 USDC/call on Base.
+**x402agentic · precheck** — Pre-pay risk firewall for x402 agents, the flagship
+of the x402 Agentic payment-trust suite. Before paying any x402 endpoint, get an
+allow/warn/block verdict: validates the payee, screens it against the OFAC
+sanctioned-address list, flags price gouging, checks asset/network, and enforces
+your spend policy. Companion endpoints: `/screen`, `/spend-guard`, `/token-check`.
+From $0.01 USDC/call on Base (precheck $0.10, screen $0.02, token-check $0.02, spend-guard $0.01).
 
 ## Install string (works from any public repo, once pushed)
 
@@ -30,11 +32,18 @@ address validity, denylist screen, community-flagged reports, price-vs-category
 gouging, absolute ceiling, asset/network sanity, facilitator reputation, and the
 caller's own spend policy.
 
-**Hosting:** self-hosted on Cloudflare Workers, x402-paid (~$0.001 USDC), settled
-via the Coinbase CDP facilitator on Base mainnet. Endpoint is
-`discoverable: true` and indexed by the x402 Bazaar.
+**Hosting:** self-hosted on Cloudflare Workers, x402-paid (from $0.01 USDC; precheck $0.10),
+settled via the Coinbase CDP facilitator on Base mainnet. The service hosts four
+endpoints — `/precheck` (full risk verdict), `/screen` (focused OFAC check),
+`/spend-guard` (per-agent budget enforcement), and `/token-check` (canonical
+asset verification) — each `discoverable: true` with the x402 Bazaar extension.
 
-**Live endpoint:** https://api.x402agentic.ai/precheck
+**Live endpoints:**
+- https://api.x402agentic.ai/precheck
+- https://api.x402agentic.ai/screen
+- https://api.x402agentic.ai/spend-guard
+- https://api.x402agentic.ai/token-check
+
 **Homepage:** https://x402agentic.ai
 
 No Bankr API key or wallet write access required to use — the consuming agent

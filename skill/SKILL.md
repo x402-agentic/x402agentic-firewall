@@ -1,6 +1,6 @@
 ---
 name: x402-precheck
-description: Before paying ANY x402 endpoint, call the x402Agentic Payment Pre-Flight Check to get an allow/warn/block verdict. Use this whenever an agent is about to settle an x402 / HTTP 402 payment — it validates the payee address, screens it against denylist and community-flagged lists, flags price gouging vs. category norms, checks the asset/network, and enforces the user's spend policy. Stops bad payments before money leaves the wallet.
+description: Before paying ANY x402 endpoint, call the x402 Agentic payment-trust suite. The flagship /precheck returns an allow/warn/block verdict — validating the payee, screening it against the OFAC sanctioned-address list, flagging price gouging vs. category norms, checking asset/network, and enforcing the user's spend policy. Companion endpoints: /screen (focused OFAC check), /spend-guard (per-agent budget enforcement), /token-check (verify a token is canonical USDC vs a lookalike). Stops bad payments before money leaves the wallet.
 tags: [x402, payments, security, agents, risk, precheck, safety]
 version: 1
 visibility: public
@@ -21,18 +21,33 @@ invalid/denied/flagged payee, overpay a gouging endpoint, or pay in the wrong
 asset.
 
 Endpoint: `https://api.x402agentic.ai/precheck`
-Price: ~$0.001 USDC/call on Base (cheap on purpose — call it on every payment).
+Price: $0.10 USDC/call on Base (configured via `PRICE_PRECHECK` / `PRICE_USDC`).
+Protocol: x402 **v2** (settles via Coinbase CDP facilitator on Base mainnet).
+
+This is the flagship endpoint of the **x402 Agentic** payment-trust suite. The same
+service hosts companion endpoints (see "Companion endpoints" below): `/screen`,
+`/spend-guard`, and `/token-check`.
+
+Screening is backed by the live **OFAC sanctioned-address list** (auto-refreshed
+weekly), plus the structural checks below — so `denylist_screen` reflects real
+sanctions data, not placeholders.
 Discovery route (free): `https://api.x402agentic.ai/`
 
 ## When to use
 
-Use this **every time** you are about to respond to an HTTP 402 challenge with a
-payment, especially when:
+Call `/precheck` before settling a payment that's **worth protecting** — i.e. any
+non-trivial or unfamiliar payment where a bad/denied payee, a gouging price, or a
+wrong asset would cost more than the check. It's most valuable when:
 
 - The endpoint is one you have not paid before.
+- The payment is large enough that the check fee is negligible against it.
 - The price looks higher than usual for that kind of service.
 - You are operating under a user spend policy / budget.
 - The 402 envelope asks you to pay in a non-USDC asset or on an unusual network.
+
+For high-frequency, sub-cent payments where a full verdict isn't worth $0.10, use
+the cheaper focused `/screen` ($0.02) for a sanctions-only check, or `/token-check`
+($0.02) for asset verification.
 
 If the verdict is `block`, **do not pay** — surface the reason to the user.
 If `warn`, pay only if the user/policy tolerates the flagged risk.
@@ -42,7 +57,7 @@ If `allow`, proceed with the payment.
 
 Forward the entire 402 response body as `challenge`, or pass fields directly.
 POST is preferred. The endpoint is itself x402-paid: your agent wallet pays the
-~$0.001 fee automatically through the normal 402 flow (e.g. via `x402-fetch`).
+per-call fee automatically through the normal 402 flow (e.g. via `x402-fetch`).
 
 ```bash
 # Forward the raw 402 challenge you just received
@@ -108,6 +123,41 @@ curl "https://api.x402agentic.ai/precheck?payTo=0x833589fCD6eDb6E08f4c7C32D4f71b
 1. `block` → abort the payment, tell the user which check failed.
 2. `warn` → only pay if within the user's risk tolerance / policy.
 3. `allow` → pay.
+
+## Companion endpoints (same service, same wallet)
+
+The x402 Agentic service hosts three more paid endpoints alongside `/precheck`.
+Each is its own x402-paid route (GET or POST) under `https://api.x402agentic.ai`.
+
+### `/screen` — OFAC sanctions screen ($0.02)
+Focused yes/no sanctions check on a single address. Lighter than `/precheck`
+when all you need is "is this payee sanctioned?".
+```bash
+curl "https://api.x402agentic.ai/screen?address=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+# -> { "address": "...", "valid": true, "sanctioned": false, "verdict": "allow", "listSize": 97 }
+```
+
+### `/spend-guard` — per-agent budget enforcement ($0.01)
+Track an agent's cumulative spend against a budget. `POST` records a spend and
+enforces the cap; `GET` previews remaining budget without recording. Soft
+(eventually-consistent) budget guard — ideal for "don't blow the monthly cap".
+```bash
+curl -X POST "https://api.x402agentic.ai/spend-guard" \
+  -H "Content-Type: application/json" \
+  -d '{ "agentId": "agent-123", "amountUsd": 0.25, "budgetUsd": 10 }'
+# -> { "agentId": "agent-123", "spentUsd": 0.25, "remainingUsd": 9.75, "allowed": true, "verdict": "allow" }
+```
+
+### `/token-check` — canonical asset verification ($0.02)
+Confirm a token contract is the real USDC (or WETH/DAI/etc.) on Base, not a
+lookalike/spoof. Returns `canonical` + symbol/decimals, or a `warn` if unknown.
+```bash
+curl "https://api.x402agentic.ai/token-check?address=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+# -> { "canonical": true, "symbol": "USDC", "decimals": 6, "verdict": "allow" }
+```
+
+All four endpoints are listed in the service's `/.well-known/agent.json` and
+`/openapi.json`, and each carries the x402 Bazaar discovery extension.
 
 ## Checks performed
 

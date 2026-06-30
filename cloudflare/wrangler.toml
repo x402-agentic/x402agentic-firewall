@@ -10,6 +10,9 @@ routes = [
 
 [vars]
 PRICE_USDC = "0.10"
+PRICE_SCREEN = "0.02"
+PRICE_SPEND_GUARD = "0.01"
+PRICE_TOKEN_CHECK = "0.02"
 # NETWORK_CAIP2 defaults to Base mainnet (eip155:8453) in code; override here if needed.
 # NETWORK_CAIP2 = "eip155:8453"
 
