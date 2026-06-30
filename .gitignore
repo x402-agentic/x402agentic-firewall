@@ -4,3 +4,5 @@ node_modules/
 dist/
 *.log
 cloudflare/pay-test.mjs
+cloudflare/bazaar-diagnose.mjs
+cloudflare/pay-test-post.mjs
