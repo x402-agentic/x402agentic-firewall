@@ -89,7 +89,7 @@ const PROVIDER = {
   name: "x402 Agentic",
   tagline: "The Payment Layer for the Autonomous Web",
   description:
-    "x402 Agentic is open infrastructure for autonomous AI agent payments. Built on x402 Protocol V2 + ERC-8004. Any agent, enterprise, or individual transacts instantly with stablecoins over HTTP.",
+    "x402 Agentic is a payment-trust suite for autonomous AI agents on Base USDC. Keyless, pay-per-call endpoints for pre-pay risk verdicts, OFAC sanctions screening, per-agent budget enforcement, canonical-asset verification, on-chain settlement proof, and payee reputation. No API key, no account — pay per request with x402.",
   email: "hello@x402agentic.ai",
   website: "https://x402agentic.ai",
   logo: "https://x402agentic.ai/logo.png",
@@ -124,7 +124,7 @@ const ENDPOINTS: Endpoint[] = [
   {
     slug: "precheck",
     priceDefault: "0.001",
-    desc: "Full pre-pay risk verdict (allow/warn/block) before paying any x402 endpoint",
+    desc: "Pre-pay risk verdict (allow / warn / block) before an agent settles any x402 payment — checks payee validity, OFAC sanctions, price gouging, asset/network, and spend policy. Part of x402 Agentic, the payment-trust suite for AI agents on Base USDC.",
     needsOverrides: true,
     inputExample: { payTo: USDC_BASE, amount: 0.01, network: "base", category: "llm" },
     inputSchema: {
@@ -143,7 +143,7 @@ const ENDPOINTS: Endpoint[] = [
   {
     slug: "screen",
     priceDefault: "0.002",
-    desc: "OFAC sanctions screen: is this address on the sanctioned list?",
+    desc: "OFAC sanctions screen on a payee address — allow/block against the live sanctioned-address list, auto-refreshed weekly. Part of x402 Agentic, the payment-trust suite for AI agents on Base USDC.",
     needsOverrides: true,
     inputExample: { address: USDC_BASE },
     inputSchema: {
@@ -170,7 +170,7 @@ const ENDPOINTS: Endpoint[] = [
   {
     slug: "spend-guard",
     priceDefault: "0.001",
-    desc: "Per-agent budget enforcement: track cumulative spend against a budget",
+    desc: "Per-agent budget enforcement — track an agent's cumulative spend against a cap and block overspend. Part of x402 Agentic, the payment-trust suite for AI agents on Base USDC.",
     inputExample: { agentId: "agent-123", amountUsd: 0.25, budgetUsd: 10 },
     inputSchema: {
       type: "object",
@@ -207,7 +207,7 @@ const ENDPOINTS: Endpoint[] = [
   {
     slug: "token-check",
     priceDefault: "0.002",
-    desc: "Verify a token contract is the canonical asset (e.g. real USDC) vs a lookalike",
+    desc: "Verify a token contract is the canonical asset (real USDC, WETH, DAI…) and not a lookalike or spoof. Part of x402 Agentic, the payment-trust suite for AI agents on Base USDC.",
     inputExample: { address: USDC_BASE },
     inputSchema: {
       type: "object",
@@ -226,7 +226,7 @@ const ENDPOINTS: Endpoint[] = [
   {
     slug: "verify-payment",
     priceDefault: "0.005",
-    desc: "Confirm an x402 payment settled on-chain: right recipient, asset, and amount",
+    desc: "Confirm an x402 payment actually settled on-chain — correct recipient, asset, and amount — from the transaction hash. Part of x402 Agentic, the payment-trust suite for AI agents on Base USDC.",
     inputExample: { txHash: "0x" + "ab".repeat(32), payTo: "0xc23C4aFA42cbaBbc03D04Bc87ecB769Fc82F1f43", amountUsd: 0.1 },
     inputSchema: {
       type: "object",
@@ -281,7 +281,7 @@ const ENDPOINTS: Endpoint[] = [
   {
     slug: "reputation",
     priceDefault: "0.002",
-    desc: "Reputation score for a payee — sanctions, community reports/vouches, trust",
+    desc: "Reputation score (0–100) for a payee from sanctions data plus community reports and vouches. Part of x402 Agentic, the payment-trust suite for AI agents on Base USDC.",
     needsOverrides: true,
     inputExample: { address: USDC_BASE },
     inputSchema: {
